@@ -123,8 +123,17 @@ function getOpenBreakRequest(username) {
   ) || null;
 }
 
+function getActiveBreakRequest(username) {
+  return getBreakRequests().find(request =>
+    request.username === String(username || '').toLowerCase() && request.status === 'approved'
+  ) || null;
+}
+
 function isSupervisor() { return !!currentAuth && currentAuth.role === 'supervisor'; }
 function isInspector() { return !!currentAuth && currentAuth.role === 'inspector'; }
+function isOperatorOnBreak() {
+  return !!currentAuth && currentAuth.role === 'operator' && !!getActiveBreakRequest(currentAuth.username);
+}
 
 function getInspectionCheckpoint(afterStationNumber) {
   const n = Number(afterStationNumber);
@@ -275,6 +284,10 @@ document.addEventListener('DOMContentLoaded', () => {
     if (event.key === BREAK_REQUESTS_KEY) {
       if (isSupervisor()) renderSupervisorDashboard();
       updateBreakRequestButton();
+      if (currentAuth && currentAuth.role === 'operator') {
+        if (document.getElementById('view-station')?.classList.contains('active')) renderTestSectionWorkspace();
+        if (document.getElementById('view-fullcard')?.classList.contains('active')) renderMasterCardView();
+      }
     }
     if (event.key === ASSIGNMENTS_KEY) {
       if (isSupervisor()) {
@@ -509,21 +522,26 @@ function updateBreakRequestButton() {
   if (!isOperator) return;
 
   const request = getOpenBreakRequest(currentAuth.username);
-  button.disabled = !!request;
   if (!request) {
+    button.disabled = false;
     button.textContent = '☕ Request Break';
+    button.onclick = openBreakRequestDialog;
     status.textContent = '';
     status.className = 'break-request-status';
   } else if (request.status === 'pending') {
+    button.disabled = true;
     button.textContent = 'Break Requested';
+    button.onclick = null;
     status.textContent = `${request.durationLabel} requested • Waiting for supervisor`;
     status.className = 'break-request-status pending';
   } else {
     const elapsed = Date.parse(request.endsAt) <= Date.now();
-    button.textContent = elapsed ? 'Break Awaiting Closure' : 'On Break';
+    button.disabled = false;
+    button.textContent = 'End Break';
+    button.onclick = endOperatorBreak;
     status.textContent = elapsed
-      ? 'Break time elapsed • Waiting for supervisor'
-      : `Break approved • Ends ${new Date(request.endsAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`;
+      ? 'Break duration elapsed • End it to resume work'
+      : `On break • Ends ${new Date(request.endsAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`;
     status.className = 'break-request-status approved';
   }
 }
@@ -620,6 +638,7 @@ window.handleLogout = handleLogout;
 window.switchView = switchView;
 window.openBreakRequestDialog = openBreakRequestDialog;
 window.submitBreakRequest = submitBreakRequest;
+window.endOperatorBreak = endOperatorBreak;
 window.assignBreakCover = assignBreakCover;
 window.createAndAssignTemporaryCover = createAndAssignTemporaryCover;
 window.declineBreakRequest = declineBreakRequest;
@@ -630,6 +649,7 @@ window.handleRemarkInput = handleRemarkInput;
 window.selectEngineFromQueue = selectEngineFromQueue;
 window.clearActiveEngine = clearActiveEngine;
 window.loadMasterCardForBarcode = loadMasterCardForBarcode;
+window.changeMasterCardEngine = changeMasterCardEngine;
 window.toggleAuditCard = toggleAuditCard;
 window.setHpOption = setHpOption;
 window.setShiftOption = setShiftOption;
@@ -645,6 +665,7 @@ let currentSelectedHp = '250 HP';
 let currentSelectedShift = 'I';
 
 function setHpOption(hp) {
+  if (isOperatorOnBreak()) return;
   currentSelectedHp = hp;
   document.querySelectorAll('.hp-box-clickable').forEach(el => {
     el.classList.toggle('active', el.getAttribute('data-hp') === hp);
@@ -652,6 +673,7 @@ function setHpOption(hp) {
 }
 
 function setShiftOption(shift) {
+  if (isOperatorOnBreak()) return;
   currentSelectedShift = shift;
   document.querySelectorAll('.shift-box-clickable').forEach(el => {
     el.classList.toggle('active', el.getAttribute('data-shift') === shift);
@@ -679,6 +701,21 @@ function renderTestSectionWorkspace() {
 
   const container = document.getElementById('active-station-workspace-container');
   if (!container) return;
+  const activeBreak = getActiveBreakRequest(currentAuth.username);
+  if (currentAuth.role === 'operator' && activeBreak) {
+    const endsAt = new Date(activeBreak.endsAt);
+    container.innerHTML = `
+      <section class="operator-break-lock" role="status">
+        <span class="operator-break-lock-icon">☕</span>
+        <span class="supervisor-eyebrow">BREAK IN PROGRESS</span>
+        <h2>Station operations are paused</h2>
+        <p>Your ${escapeHtml(activeBreak.durationLabel)} break is active${Number.isNaN(endsAt.getTime()) ? '' : ` until ${escapeHtml(endsAt.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }))}`}.</p>
+        <p>End your break to resume engine inspections and select Pass or Fail.</p>
+        <button type="button" class="supervisor-action-btn primary" onclick="endOperatorBreak()">End Break &amp; Resume Work</button>
+      </section>
+    `;
+    return;
+  }
 
   const currentStationObj = getEffectiveStationForUser(currentAuth.username, currentAuth.stationId);
   currentAuth.stationId = currentStationObj.id;
@@ -1217,6 +1254,10 @@ function submitInspectionResult() {
  * Select an engine from the operator/inspector queue menu
  */
 function selectEngineFromQueue(barcode) {
+  if (isOperatorOnBreak()) {
+    showToast('End your break before selecting an engine.', 'warning');
+    return;
+  }
   const allEngines = getAllRegisteredEngines();
   const found = allEngines.find(e => e.barcode === barcode);
   if (found) {
@@ -1233,6 +1274,10 @@ function selectEngineFromQueue(barcode) {
  * Deselect active engine and return to queue menu
  */
 function clearActiveEngine() {
+  if (isOperatorOnBreak()) {
+    showToast('End your break before returning to the engine queue.', 'warning');
+    return;
+  }
   currentEngine = null;
   currentInspectionResult = '';
   renderTestSectionWorkspace();
@@ -1396,6 +1441,10 @@ function generateChecklistTableHtml(sectionId, engine) {
  * Handle Submitting the Active Station
  */
 async function submitActiveStation(sectionId) {
+  if (isOperatorOnBreak()) {
+    showToast('End your break before submitting station operations.', 'warning');
+    return;
+  }
   if (!currentAuth) {
     switchView('login');
     return;
@@ -1594,51 +1643,143 @@ function renderMasterCardView() {
   if (!container) return;
 
   const allEngines = getAllRegisteredEngines();
-  
-  let html = `
-    <div class="master-card-controls">
-      <label for="master-card-engine-select" class="master-select-label">Select Engine to View History Card:</label>
-      <select id="master-card-engine-select" class="master-select-dropdown" onchange="loadMasterCardForBarcode(this.value)">
-        <option value="">-- Choose Engine Serial / Barcode --</option>
-        ${allEngines.map(eng => {
-          const compCount = Object.keys(eng.sections || {}).length;
-          return `<option value="${eng.barcode}" ${selectedEngineBarcode === eng.barcode ? 'selected' : ''}>
-            ${eng.barcode} (${compCount}/${TOTAL_STATIONS_COUNT} Sections Completed)
-          </option>`;
-        }).join('')}
-      </select>
-      <button type="button" class="btn-print-card" onclick="window.print()">🖨️ Print Master Card</button>
-    </div>
-  `;
+  const documentWrapper = document.getElementById('master-card-document-wrapper');
+  const selectedEngine = allEngines.find(engine => engine.barcode === selectedEngineBarcode);
+  if (!selectedEngine) selectedEngineBarcode = null;
 
-  container.innerHTML = html;
-
-  if (!selectedEngineBarcode && allEngines.length > 0) {
-    selectedEngineBarcode = allEngines[0].barcode;
-    const select = document.getElementById('master-card-engine-select');
-    if (select) select.value = selectedEngineBarcode;
+  if (!selectedEngineBarcode) {
+    container.innerHTML = `
+      <div class="master-engine-picker">
+        <div class="master-engine-picker-heading">
+          <div><span class="master-engine-eyebrow">ENGINE HISTORY CARD</span><h2>Select an Engine</h2><p>Choose an engine to view its inspection history card.</p></div>
+          <span class="master-engine-count">${allEngines.length} engine${allEngines.length === 1 ? '' : 's'}</span>
+        </div>
+        <div class="master-engine-grid">
+          ${allEngines.length ? allEngines.map(engine => {
+            const sections = Object.values(engine.sections || {});
+            const latestSection = sections
+              .filter(section => section && (section.operator_name || section.operator_token))
+              .sort((a, b) => new Date(b.submitted_at || 0) - new Date(a.submitted_at || 0))[0];
+            const updatedAt = engine.updated_at || engine.created_at || engine.date;
+            const updatedTime = updatedAt && !Number.isNaN(new Date(updatedAt).getTime())
+              ? new Date(updatedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+              : 'Time unavailable';
+            const engineSpec = `${engine.spec || 'H6 BSVI - 4V Engines'}${engine.hp_rating ? ` (${engine.hp_rating})` : ''}`;
+            return `<article class="master-engine-card">
+              <div class="master-engine-card-top"><strong class="master-engine-barcode">▥ ${escapeHtml(engine.barcode)}</strong><span class="master-engine-time">⏱ ${escapeHtml(updatedTime)}</span></div>
+              <strong class="master-engine-spec">${escapeHtml(engineSpec)}</strong>
+              <span class="master-engine-prior">Prior Inspector: <strong>${escapeHtml(latestSection ? latestSection.operator_name || latestSection.operator_token : 'Not inspected yet')}</strong></span>
+              <span class="master-engine-progress">${sections.length} of ${TOTAL_STATIONS_COUNT} stations recorded</span>
+              <button type="button" class="master-engine-select" onclick="loadMasterCardForBarcode('${escapeAttr(engine.barcode)}')">Select Engine &amp; Inspect →</button>
+            </article>`;
+          }).join('') : '<div class="master-engine-empty">No engines have been registered yet. Register an engine from the operator station to view its Master Card here.</div>'}
+        </div>
+      </div>
+    `;
+    if (documentWrapper) documentWrapper.hidden = true;
+    return;
   }
 
+  const sectionCount = Object.keys(selectedEngine.sections || {}).length;
+  container.innerHTML = `
+    <div class="master-card-selected">
+      <div class="master-card-selected-info">
+        <span class="master-engine-eyebrow">SELECTED ENGINE</span>
+        <strong>${escapeHtml(selectedEngine.barcode)}</strong>
+        <span>${escapeHtml(selectedEngine.spec || 'H6 BSVI - 4V Engines')}${selectedEngine.hp_rating ? ` (${escapeHtml(selectedEngine.hp_rating)})` : ''} • ${sectionCount}/${TOTAL_STATIONS_COUNT} stations recorded</span>
+      </div>
+      <div class="master-card-selected-actions">
+        <button type="button" class="supervisor-action-btn ghost" onclick="changeMasterCardEngine()">← Choose another engine</button>
+        <button type="button" class="btn-print-card" onclick="window.print()">🖨️ Print Master Card</button>
+      </div>
+    </div>
+  `;
+  if (documentWrapper) documentWrapper.hidden = false;
   syncMasterCardTables(selectedEngineBarcode);
 }
 
 function loadMasterCardForBarcode(barcode) {
-  selectedEngineBarcode = barcode;
-  syncMasterCardTables(barcode);
+  const engine = getAllRegisteredEngines().find(item => item.barcode === barcode);
+  if (!engine) {
+    showToast('The selected engine could not be found.', 'error');
+    renderMasterCardView();
+    return;
+  }
+  selectedEngineBarcode = engine.barcode;
+  renderMasterCardView();
+}
+
+function changeMasterCardEngine() {
+  selectedEngineBarcode = null;
+  renderMasterCardView();
 }
 
 function syncMasterCardTables(barcode) {
-  if (!barcode) return;
+  if (!barcode) return false;
 
   const allEngines = getAllRegisteredEngines();
   const engine = allEngines.find(e => e.barcode === barcode);
-  if (!engine) return;
+  if (!engine) return false;
+  const documentWrapper = document.getElementById('master-card-document-wrapper');
+  if (!documentWrapper) return false;
 
   const barcodeInput = document.getElementById('barcode-input');
   if (barcodeInput) barcodeInput.value = engine.barcode;
 
   const specInput = document.getElementById('engine-no-spec');
   if (specInput) specInput.value = `${engine.barcode} / ${engine.spec || 'H6 BSVI'}`;
+  const dateInput = document.getElementById('date-input');
+  if (dateInput) dateInput.value = engine.date ? new Date(engine.date).toLocaleDateString() : '';
+  const deviationInput = document.getElementById('major-deviation');
+  if (deviationInput) deviationInput.value = engine.major_deviation || '';
+  documentWrapper.querySelectorAll('.shift-box').forEach(option => {
+    option.classList.toggle('active', option.textContent.trim() === String(engine.shift || 'I'));
+  });
+  documentWrapper.querySelectorAll('.hp-box').forEach(option => {
+    option.classList.toggle('active', option.textContent.trim() === String(engine.hp_rating || '250 HP'));
+  });
+  documentWrapper.querySelectorAll('[id^="comp-"]').forEach(input => {
+    if (input.type === 'checkbox') input.checked = false;
+    else input.value = '';
+  });
+  Object.entries(engine.components || {}).forEach(([key, value]) => {
+    if (key === 'c3') {
+      const color = String(value).toLowerCase();
+      const yellow = documentWrapper.querySelector('#comp-3-y');
+      const blue = documentWrapper.querySelector('#comp-3-b');
+      if (yellow) yellow.checked = color === 'yellow';
+      if (blue) blue.checked = color === 'blue';
+      return;
+    }
+    const componentId = `comp-${key.slice(1)}`;
+    const componentInput = Array.from(documentWrapper.querySelectorAll('[id^="comp-"]'))
+      .find(input => input.id === componentId);
+    if (componentInput) componentInput.value = value || '';
+  });
+
+  documentWrapper.querySelectorAll('.sec-status-badge').forEach(badge => {
+    badge.textContent = 'Pending';
+    badge.className = 'sec-status-badge';
+  });
+  documentWrapper.querySelectorAll('tr[data-section]').forEach(row => {
+    row.classList.remove('row-passed', 'row-failed');
+    const statusInput = row.querySelector('.row-status-value');
+    if (statusInput) statusInput.value = '';
+    row.querySelector('.pass-btn')?.classList.remove('active');
+    row.querySelector('.fail-btn')?.classList.remove('active');
+    const remarkInput = row.querySelector('.remark-input');
+    if (remarkInput) {
+      remarkInput.value = '';
+      remarkInput.classList.remove('remark-compulsory', 'remark-invalid');
+    }
+    const remarkError = row.querySelector('.remark-error-msg');
+    if (remarkError) remarkError.style.display = 'none';
+  });
+  documentWrapper.querySelectorAll('input, select, textarea, .status-btn').forEach(control => {
+    control.disabled = isOperatorOnBreak();
+    if (isOperatorOnBreak()) control.title = 'End your break before changing engine inspection details.';
+    else control.removeAttribute('title');
+  });
 
   // Reflect all completed sections in master tables
   if (engine.sections) {
@@ -1655,7 +1796,10 @@ function syncMasterCardTables(barcode) {
         }
       }
 
-      const rows = document.querySelectorAll(`tr[data-section="${secId}"]`);
+      const escapedSectionId = window.CSS && typeof window.CSS.escape === 'function'
+        ? window.CSS.escape(secId)
+        : secId.replace(/["\\]/g, '\\$&');
+      const rows = documentWrapper.querySelectorAll(`tr[data-section="${escapedSectionId}"]`);
       if (rows && secData.test_cases) {
         rows.forEach((row, idx) => {
           const tc = secData.test_cases[idx];
@@ -1683,6 +1827,7 @@ function syncMasterCardTables(barcode) {
       }
     });
   }
+  return true;
 }
 
 function getAllRegisteredEngines() {
@@ -1934,10 +2079,14 @@ function declineBreakRequest(requestId) {
 }
 
 function completeBreakRequest(requestId) {
-  if (!isSupervisor()) return;
+  if (!isSupervisor() && (!currentAuth || currentAuth.role !== 'operator')) return;
   const requests = getBreakRequests();
   const request = requests.find(item => item.id === requestId);
   if (!request || request.status !== 'approved') return;
+  if (!isSupervisor() && request.username !== currentAuth.username) {
+    showToast('You can only end your own break.', 'error');
+    return;
+  }
   const assignments = getTodayAssignments();
   const coverAssignment = assignments[request.coverUsername];
   if (coverAssignment && coverAssignment.breakRequestId === request.id) {
@@ -1949,11 +2098,23 @@ function completeBreakRequest(requestId) {
   }
   request.status = 'completed';
   request.completedAt = new Date().toISOString();
-  request.completedBy = SUPERVISOR_USER;
+  request.completedBy = currentAuth.username;
   saveBreakRequests(requests);
-  renderSupervisorDashboard();
   updateBreakRequestButton();
+  if (isSupervisor()) renderSupervisorDashboard();
+  if (document.getElementById('view-station')?.classList.contains('active')) renderTestSectionWorkspace();
+  if (document.getElementById('view-fullcard')?.classList.contains('active')) renderMasterCardView();
   showToast('Break ended and the cover operator’s previous assignment was restored.', 'success');
+}
+
+function endOperatorBreak() {
+  if (!currentAuth || currentAuth.role !== 'operator') return;
+  const request = getActiveBreakRequest(currentAuth.username);
+  if (!request) {
+    updateBreakRequestButton();
+    return;
+  }
+  completeBreakRequest(request.id);
 }
 
 function toggleWorkerActive(username) {
@@ -1988,6 +2149,10 @@ function supervisorOpenStation(stationId) {
 }
 
 function setRowStatus(btn, status) {
+  if (isOperatorOnBreak()) {
+    showToast('End your break before changing an inspection status.', 'warning');
+    return;
+  }
   const row = btn.closest('tr');
   if (!row) return;
 
@@ -2032,6 +2197,10 @@ function setRowStatus(btn, status) {
 }
 
 function handleRemarkInput(input) {
+  if (isOperatorOnBreak()) {
+    showToast('End your break before editing inspection remarks.', 'warning');
+    return;
+  }
   const row = input.closest('tr');
   if (!row) return;
 

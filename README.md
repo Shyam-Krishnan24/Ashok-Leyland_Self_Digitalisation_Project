@@ -6,6 +6,7 @@ A web-based manufacturing execution system (MES) for engine assembly inspection,
 
 - Sequential engine inspection across the configured assembly stations.
 - Engine registration, barcode tracking, inspection queues, and history cards.
+- Engine-card selection to load the corresponding Master Card for operators, supervisors, and inspectors.
 - Pass/fail test results, with remarks required for failed checks.
 - Quality inspection checkpoints throughout the station workflow.
 - Supervisor dashboard for daily worker and station assignments.
@@ -63,7 +64,8 @@ Supervisors can add temporary workers with their own login IDs and PINs. Change 
 2. The supervisor reviews it on the workforce dashboard.
 3. The supervisor assigns an active operator as cover or creates and assigns a temporary worker.
 4. The cover is assigned to the requesting operator's station for the break.
-5. The supervisor ends the break to restore the cover operator's previous daily assignment.
+5. The operator's station operations and inspection controls are locked during the approved break.
+6. The operator can end their own break early, or the supervisor can end it; the cover operator's previous daily assignment is then restored.
 
 ## Data and storage
 
