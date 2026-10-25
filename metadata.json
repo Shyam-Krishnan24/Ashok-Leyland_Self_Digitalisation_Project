@@ -1,0 +1,6 @@
+{
+  "name": "Ashok Leyland Engine History Card MES",
+  "description": "Enterprise Manufacturing Execution & Quality Tracking System for Ashok Leyland H-Series Auto Engines across 69 sequential assembly stations.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
